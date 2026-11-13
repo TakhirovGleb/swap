@@ -1,0 +1,805 @@
+Это мой проект push_swap на C. Объясняй его по-русски как преподаватель начинающему.
+Сначала дай общую картину, затем разбирай по одному файлу и жди моего «дальше».
+Для каждой функции объясняй назначение, аргументы, работу строк и связь с остальным кодом.
+Показывай изменения стеков A и B на маленьких примерах. Отдельно объясни указатели,
+кольцевой буфер, ранги, инверсии, битовые операции и управление памятью.
+Не придумывай отсутствующее поведение. Различай число операций push_swap и время
+исполнения C-кода: подготовка rank_input и проверка дубликатов занимают O(n²).
+
+КАРТА ПРОЕКТА
+Цель: вывести команды, сортирующие уникальные int по возрастанию в стеке A;
+вспомогательный стек B в конце должен быть пустым.
+sa/sb — обмен верхних двух; ss — оба обмена; pa — B→A; pb — A→B;
+ra/rb — верхний элемент вниз; rr — оба; rra/rrb — нижний вверх; rrr — оба.
+Стек — кольцевой массив: v — память, n — размер, head — индекс вершины, cap — ёмкость.
+Доступ к логическому элементу i: v[(head+i)%cap].
+main: parse → rank_input → select_strategy → сортировка → benchmark → destroy.
+parse.c: числа из отдельных аргументов или строки, пробелы, знаки, диапазон int,
+флаги --simple/--medium/--complex/--adaptive и --bench; ошибки → Error в stderr, exit(1).
+rank.c: дубликаты запрещены; каждое число заменяется числом меньших элементов
+(например, 40 -10 20 → 2 0 1). disorder = число инверсий / число всех пар.
+Автовыбор: disorder < 0.2 → simple; < 0.5 → medium; иначе complex.
+Для n <= 5 всегда используется simple, даже при другом выбранном режиме.
+sort.c: simple переносит минимумы в B, сортирует остаток до трёх элементов,
+возвращает B в A; complex — двоичная LSD radix-сортировка рангов.
+medium.c: диапазоны рангов шириной примерно sqrt(n) переносятся в B,
+затем максимумы B возвращаются в A. Поиск максимумов тоже требует проходов.
+stack.c: все действия выполняются через op; она считает и печатает команды,
+в том числе вызовы, которые не меняют слишком маленький/пустой стек.
+bench.c: disorder, выбранная стратегия и счётчики в stderr; stdout содержит команды.
+checker_bonus.c: отдельная программа читает команды из stdin и исполняет молча;
+OK, если A отсортирован и B пуст; иначе KO; некорректные команды → Error.
+utils.c: вывод, сравнение строк, освобождение памяти и обработка ошибок.
+Makefile: make собирает push_swap; make bonus собирает checker.
+tests/test.py: независимый симулятор команд, перестановки до 5 элементов,
+случайные массивы до 500, проверка парсинга, checker и benchmark.
+Тесты здесь описаны по исходнику; их запуск этой выдержкой не подтверждается.
+
+Ниже полный исходный код C и Makefile без декоративных шапок.
+Это позволяет объяснять реальную реализацию, а не только пересказ.
+
+
+===== include/push_swap.h =====
+/*                                                                            */
+/*                                                        :::      ::::::::   */
+/*   push_swap.h                                        :::      ::::::::   */
+/*                                                    +:+ +:+         +:+     */
+/*   By: student <student@student.42.fr>            +#+  +:+       +#+        */
+/*                                                +#+#+#+#+#+   +#+           */
+/*   Created: 2026/11/13 12:00:00 by student           #+#    #+#             */
+/*   Updated: 2026/11/13 12:00:00 by student          ###   ########.fr       */
+/*                                                                            */
+/* ************************************************************************** */
+#ifndef PUSH_SWAP_H
+# define PUSH_SWAP_H
+# include <stdlib.h>
+# include <unistd.h>
+# include <limits.h>
+typedef struct s_stack
+{
+	int	*v;
+	int	n;
+	int	head;
+	int	cap;
+}	t_stack;
+typedef struct s_data
+{
+	t_stack	a;
+	t_stack	b;
+	int		mode;
+	int		bench;
+	int		silent;
+	double	disorder;
+	size_t	counts[11];
+}	t_data;
+enum e_op
+{
+	SA,
+	SB,
+	SS,
+	PA,
+	PB,
+	RA,
+	RB,
+	RR,
+	RRA,
+	RRB,
+	RRR
+};
+int		at(t_stack *s, int i);
+void	op(t_data *d, int code);
+char	*op_name(int code);
+void	putstr(int fd, const char *s);
+void	putnum(int fd, size_t n);
+void	fail(t_data *d);
+void	destroy(t_data *d);
+int		equal(const char *a, const char *b);
+void	parse(t_data *d, int argc, char **argv);
+void	rank_input(t_data *d);
+int		sorted(t_stack *s);
+void	sort_simple(t_data *d);
+void	sort_medium(t_data *d);
+void	sort_complex(t_data *d);
+void	sort_small(t_data *d);
+void	to_top(t_data *d, int pos, int stack_b);
+void	benchmark(t_data *d, int selected);
+#endif
+
+
+===== src/main.c =====
+/*                                                                            */
+/*                                                        :::      ::::::::   */
+/*   main.c                                             :::      ::::::::   */
+/*                                                    +:+ +:+         +:+     */
+/*   By: student <student@student.42.fr>            +#+  +:+       +#+        */
+/*                                                +#+#+#+#+#+   +#+           */
+/*   Created: 2026/11/13 12:00:00 by student           #+#    #+#             */
+/*   Updated: 2026/11/13 12:00:00 by student          ###   ########.fr       */
+/*                                                                            */
+/* ************************************************************************** */
+#include "push_swap.h"
+static int	select_strategy(t_data *d)
+{
+	int	selected;
+	selected = d->mode;
+	if (selected == -1 || selected == 3)
+	{
+		selected = 2;
+		if (d->disorder < 0.5)
+			selected = 1;
+		if (d->disorder < 0.2)
+			selected = 0;
+	}
+	return (selected);
+}
+int	main(int argc, char **argv)
+{
+	t_data	d;
+	int		selected;
+	d = (t_data){0};
+	d.mode = -1;
+	if (argc == 1)
+		return (0);
+	parse(&d, argc, argv);
+	rank_input(&d);
+	selected = select_strategy(&d);
+	if (!sorted(&d.a))
+	{
+		if (selected == 0 || d.a.n <= 5)
+			sort_simple(&d);
+		else if (selected == 1)
+			sort_medium(&d);
+		else
+			sort_complex(&d);
+	}
+	if (d.bench)
+		benchmark(&d, selected);
+	destroy(&d);
+	return (0);
+}
+
+
+===== src/parse.c =====
+/*                                                                            */
+/*                                                        :::      ::::::::   */
+/*   parse.c                                            :::      ::::::::   */
+/*                                                    +:+ +:+         +:+     */
+/*   By: student <student@student.42.fr>            +#+  +:+       +#+        */
+/*                                                +#+#+#+#+#+   +#+           */
+/*   Created: 2026/11/13 12:00:00 by student           #+#    #+#             */
+/*   Updated: 2026/11/13 12:00:00 by student          ###   ########.fr       */
+/*                                                                            */
+/* ************************************************************************** */
+#include "push_swap.h"
+static int	space(char c)
+{
+	return (c == ' ' || (c >= 9 && c <= 13));
+}
+static int	number(t_data *d, char **p)
+{
+	long	n;
+	int		sign;
+	sign = 1;
+	if (**p == '-' || **p == '+')
+	{
+		if (**p == '-')
+			sign = -1;
+		(*p)++;
+	}
+	if (**p < '0' || **p > '9')
+		fail(d);
+	n = 0;
+	while (**p >= '0' && **p <= '9')
+	{
+		n = n * 10 + *(*p)++ - '0';
+		if (n > (long)INT_MAX + (sign == -1))
+			fail(d);
+	}
+	if (**p && !space(**p))
+		fail(d);
+	return ((int)(n * sign));
+}
+static int	flag(t_data *d, char *s)
+{
+	if (equal(s, "--bench") && !d->bench)
+		d->bench = 1;
+	else if (d->mode == -1 && equal(s, "--simple"))
+		d->mode = 0;
+	else if (d->mode == -1 && equal(s, "--medium"))
+		d->mode = 1;
+	else if (d->mode == -1 && equal(s, "--complex"))
+		d->mode = 2;
+	else if (d->mode == -1 && equal(s, "--adaptive"))
+		d->mode = 3;
+	else
+		return (0);
+	return (1);
+}
+static void	argument(t_data *d, char *s)
+{
+	int	before;
+	before = d->a.n;
+	while (*s)
+	{
+		while (space(*s))
+			s++;
+		if (*s)
+			d->a.v[d->a.n++] = number(d, &s);
+	}
+	if (d->a.n == before)
+		fail(d);
+}
+void	parse(t_data *d, int argc, char **argv)
+{
+	size_t	cap;
+	int		i;
+	int		j;
+	cap = 0;
+	i = 0;
+	while (++i < argc)
+	{
+		j = 0;
+		while (argv[i][j++])
+			cap++;
+	}
+	if (cap > INT_MAX - 1)
+		fail(d);
+	d->a.cap = (int)cap + 1;
+	d->b.cap = d->a.cap;
+	d->a.v = malloc(sizeof(int) * d->a.cap);
+	d->b.v = malloc(sizeof(int) * d->b.cap);
+	if (!d->a.v || !d->b.v)
+		fail(d);
+	i = 0;
+	while (++i < argc)
+		if (d->silent || !flag(d, argv[i]))
+			argument(d, argv[i]);
+}
+
+
+===== src/rank.c =====
+/*                                                                            */
+/*                                                        :::      ::::::::   */
+/*   rank.c                                             :::      ::::::::   */
+/*                                                    +:+ +:+         +:+     */
+/*   By: student <student@student.42.fr>            +#+  +:+       +#+        */
+/*                                                +#+#+#+#+#+   +#+           */
+/*   Created: 2026/11/13 12:00:00 by student           #+#    #+#             */
+/*   Updated: 2026/11/13 12:00:00 by student          ###   ########.fr       */
+/*                                                                            */
+/* ************************************************************************** */
+#include "push_swap.h"
+static void	check_duplicates(t_data *d)
+{
+	int	i;
+	int	j;
+	i = -1;
+	while (++i < d->a.n)
+	{
+		j = i;
+		while (++j < d->a.n)
+			if (d->a.v[i] == d->a.v[j])
+				fail(d);
+	}
+}
+void	rank_input(t_data *d)
+{
+	int		*ranks;
+	int		i;
+	int		j;
+	double	mistakes;
+	check_duplicates(d);
+	ranks = malloc(sizeof(int) * d->a.cap);
+	if (!ranks)
+		fail(d);
+	mistakes = 0;
+	i = -1;
+	while (++i < d->a.n)
+	{
+		ranks[i] = 0;
+		j = -1;
+		while (++j < d->a.n)
+		{
+			ranks[i] += (d->a.v[j] < d->a.v[i]);
+			mistakes += (j > i && d->a.v[i] > d->a.v[j]);
+		}
+	}
+	if (d->a.n > 1)
+		d->disorder = mistakes / ((double)d->a.n * (d->a.n - 1) / 2);
+	free(d->a.v);
+	d->a.v = ranks;
+}
+
+
+===== src/stack.c =====
+/*                                                                            */
+/*                                                        :::      ::::::::   */
+/*   stack.c                                            :::      ::::::::   */
+/*                                                    +:+ +:+         +:+     */
+/*   By: student <student@student.42.fr>            +#+  +:+       +#+        */
+/*                                                +#+#+#+#+#+   +#+           */
+/*   Created: 2026/11/13 12:00:00 by student           #+#    #+#             */
+/*   Updated: 2026/11/13 12:00:00 by student          ###   ########.fr       */
+/*                                                                            */
+/* ************************************************************************** */
+#include "push_swap.h"
+int	at(t_stack *s, int i)
+{
+	return (s->v[(s->head + i) % s->cap]);
+}
+static void	swap(t_stack *s)
+{
+	int	tmp;
+	int	next;
+	if (s->n < 2)
+		return ;
+	next = (s->head + 1) % s->cap;
+	tmp = s->v[s->head];
+	s->v[s->head] = s->v[next];
+	s->v[next] = tmp;
+}
+static void	push(t_stack *dst, t_stack *src)
+{
+	if (!src->n)
+		return ;
+	dst->head = (dst->head + dst->cap - 1) % dst->cap;
+	dst->v[dst->head] = at(src, 0);
+	dst->n++;
+	src->head = (src->head + 1) % src->cap;
+	src->n--;
+}
+static void	rotate(t_stack *s, int reverse)
+{
+	int	tmp;
+	if (s->n < 2)
+		return ;
+	if (reverse)
+	{
+		tmp = at(s, s->n - 1);
+		s->head = (s->head + s->cap - 1) % s->cap;
+		s->v[s->head] = tmp;
+	}
+	else
+	{
+		tmp = at(s, 0);
+		s->v[(s->head + s->n) % s->cap] = tmp;
+		s->head = (s->head + 1) % s->cap;
+	}
+}
+void	op(t_data *d, int c)
+{
+	if (c == SA || c == SS)
+		swap(&d->a);
+	if (c == SB || c == SS)
+		swap(&d->b);
+	if (c == PA)
+		push(&d->a, &d->b);
+	if (c == PB)
+		push(&d->b, &d->a);
+	if (c == RA || c == RR || c == RRA || c == RRR)
+		rotate(&d->a, c == RRA || c == RRR);
+	if (c == RB || c == RR || c == RRB || c == RRR)
+		rotate(&d->b, c == RRB || c == RRR);
+	d->counts[c]++;
+	if (!d->silent)
+	{
+		putstr(1, op_name(c));
+		putstr(1, "\n");
+	}
+}
+
+
+===== src/sort.c =====
+/*                                                                            */
+/*                                                        :::      ::::::::   */
+/*   sort.c                                             :::      ::::::::   */
+/*                                                    +:+ +:+         +:+     */
+/*   By: student <student@student.42.fr>            +#+  +:+       +#+        */
+/*                                                +#+#+#+#+#+   +#+           */
+/*   Created: 2026/11/13 12:00:00 by student           #+#    #+#             */
+/*   Updated: 2026/11/13 12:00:00 by student          ###   ########.fr       */
+/*                                                                            */
+/* ************************************************************************** */
+#include "push_swap.h"
+int	sorted(t_stack *s)
+{
+	int	i;
+	i = 0;
+	while (++i < s->n)
+		if (at(s, i - 1) > at(s, i))
+			return (0);
+	return (1);
+}
+void	to_top(t_data *d, int pos, int stack_b)
+{
+	int	n;
+	int	forward;
+	int	backward;
+	n = d->a.n;
+	forward = RA;
+	backward = RRA;
+	if (stack_b)
+	{
+		n = d->b.n;
+		forward = RB;
+		backward = RRB;
+	}
+	if (pos <= n / 2)
+		while (pos-- > 0)
+			op(d, forward);
+	else
+		while (pos++ < n)
+			op(d, backward);
+}
+void	sort_simple(t_data *d)
+{
+	int	i;
+	int	min;
+	while (d->a.n > 3 && !sorted(&d->a))
+	{
+		min = 0;
+		i = 0;
+		while (++i < d->a.n)
+			if (at(&d->a, i) < at(&d->a, min))
+				min = i;
+		to_top(d, min, 0);
+		op(d, PB);
+	}
+	sort_small(d);
+	while (d->b.n)
+		op(d, PA);
+}
+void	sort_small(t_data *d)
+{
+	int	max;
+	int	i;
+	if (sorted(&d->a))
+		return ;
+	if (d->a.n == 3)
+	{
+		max = 0;
+		i = 0;
+		while (++i < 3)
+			if (at(&d->a, i) > at(&d->a, max))
+				max = i;
+		if (max == 0)
+			op(d, RA);
+		if (max == 1)
+			op(d, RRA);
+	}
+	if (at(&d->a, 0) > at(&d->a, 1))
+		op(d, SA);
+}
+void	sort_complex(t_data *d)
+{
+	int	bit;
+	int	i;
+	int	n;
+	n = d->a.n;
+	bit = 0;
+	while (((n - 1) >> bit) && !sorted(&d->a))
+	{
+		i = 0;
+		while (i++ < n)
+		{
+			if ((at(&d->a, 0) >> bit) & 1)
+				op(d, RA);
+			else
+				op(d, PB);
+		}
+		while (d->b.n)
+			op(d, PA);
+		bit++;
+	}
+}
+
+
+===== src/medium.c =====
+/*                                                                            */
+/*                                                        :::      ::::::::   */
+/*   medium.c                                           :::      ::::::::   */
+/*                                                    +:+ +:+         +:+     */
+/*   By: student <student@student.42.fr>            +#+  +:+       +#+        */
+/*                                                +#+#+#+#+#+   +#+           */
+/*   Created: 2026/11/13 12:00:00 by student           #+#    #+#             */
+/*   Updated: 2026/11/13 12:00:00 by student          ###   ########.fr       */
+/*                                                                            */
+/* ************************************************************************** */
+#include "push_swap.h"
+static void	chunk(t_data *d, int low, int high)
+{
+	int	left;
+	left = high - low;
+	while (left--)
+	{
+		while (at(&d->a, 0) < low || at(&d->a, 0) >= high)
+			op(d, RA);
+		op(d, PB);
+		if (at(&d->b, 0) < (low + high) / 2)
+			op(d, RB);
+	}
+}
+static void	return_chunks(t_data *d)
+{
+	int	i;
+	int	max;
+	while (d->b.n)
+	{
+		max = 0;
+		i = 0;
+		while (++i < d->b.n)
+			if (at(&d->b, i) > at(&d->b, max))
+				max = i;
+		to_top(d, max, 1);
+		op(d, PA);
+	}
+}
+void	sort_medium(t_data *d)
+{
+	int	width;
+	int	n;
+	int	low;
+	int	i;
+	n = d->a.n;
+	width = 1;
+	while (width * width < n && width < 46340)
+		width++;
+	low = 0;
+	while (low < n)
+	{
+		i = low + width;
+		if (i > n)
+			i = n;
+		chunk(d, low, i);
+		low = i;
+	}
+	return_chunks(d);
+}
+
+
+===== src/names.c =====
+/*                                                                            */
+/*                                                        :::      ::::::::   */
+/*   names.c                                            :::      ::::::::   */
+/*                                                    +:+ +:+         +:+     */
+/*   By: student <student@student.42.fr>            +#+  +:+       +#+        */
+/*                                                +#+#+#+#+#+   +#+           */
+/*   Created: 2026/11/13 12:00:00 by student           #+#    #+#             */
+/*   Updated: 2026/11/13 12:00:00 by student          ###   ########.fr       */
+/*                                                                            */
+/* ************************************************************************** */
+#include "push_swap.h"
+char	*op_name(int code)
+{
+	if (code == SA)
+		return ("sa");
+	if (code == SB)
+		return ("sb");
+	if (code == SS)
+		return ("ss");
+	if (code == PA)
+		return ("pa");
+	if (code == PB)
+		return ("pb");
+	if (code == RA)
+		return ("ra");
+	if (code == RB)
+		return ("rb");
+	if (code == RR)
+		return ("rr");
+	if (code == RRA)
+		return ("rra");
+	if (code == RRB)
+		return ("rrb");
+	return ("rrr");
+}
+
+
+===== src/bench.c =====
+/*                                                                            */
+/*                                                        :::      ::::::::   */
+/*   bench.c                                            :::      ::::::::   */
+/*                                                    +:+ +:+         +:+     */
+/*   By: student <student@student.42.fr>            +#+  +:+       +#+        */
+/*                                                +#+#+#+#+#+   +#+           */
+/*   Created: 2026/11/13 12:00:00 by student           #+#    #+#             */
+/*   Updated: 2026/11/13 12:00:00 by student          ###   ########.fr       */
+/*                                                                            */
+/* ************************************************************************** */
+#include "push_swap.h"
+static void	strategy(t_data *d, int selected)
+{
+	putstr(2, "[bench] strategy: ");
+	if (d->mode == -1 || d->mode == 3)
+		putstr(2, "adaptive / ");
+	if (selected == 0)
+		putstr(2, "simple O(n^2)\n");
+	if (selected == 1)
+		putstr(2, "medium O(n*sqrt(n))\n");
+	if (selected == 2)
+		putstr(2, "complex O(n*log(n))\n");
+}
+static void	operation_counts(t_data *d)
+{
+	int	i;
+	i = -1;
+	while (++i < 11)
+	{
+		putstr(2, "[bench] ");
+		putstr(2, op_name(i));
+		putstr(2, ": ");
+		putnum(2, d->counts[i]);
+		putstr(2, "\n");
+	}
+}
+void	benchmark(t_data *d, int selected)
+{
+	size_t	total;
+	int		i;
+	int		percent;
+	percent = (int)(d->disorder * 10000 + 0.5);
+	putstr(2, "[bench] disorder: ");
+	putnum(2, percent / 100);
+	putstr(2, ".");
+	if (percent % 100 < 10)
+		putstr(2, "0");
+	putnum(2, percent % 100);
+	putstr(2, "%\n");
+	strategy(d, selected);
+	total = 0;
+	i = -1;
+	while (++i < 11)
+		total += d->counts[i];
+	putstr(2, "[bench] total: ");
+	putnum(2, total);
+	putstr(2, "\n");
+	operation_counts(d);
+}
+
+
+===== src/checker_bonus.c =====
+/*                                                                            */
+/*                                                        :::      ::::::::   */
+/*   checker_bonus.c                                    :::      ::::::::   */
+/*                                                    +:+ +:+         +:+     */
+/*   By: student <student@student.42.fr>            +#+  +:+       +#+        */
+/*                                                +#+#+#+#+#+   +#+           */
+/*   Created: 2026/11/13 12:00:00 by student           #+#    #+#             */
+/*   Updated: 2026/11/13 12:00:00 by student          ###   ########.fr       */
+/*                                                                            */
+/* ************************************************************************** */
+#include "push_swap.h"
+static void	execute(t_data *d, char *line)
+{
+	int	i;
+	i = -1;
+	while (++i < 11)
+	{
+		if (equal(line, op_name(i)))
+		{
+			op(d, i);
+			return ;
+		}
+	}
+	fail(d);
+}
+static void	read_ops(t_data *d)
+{
+	char	line[4];
+	char	c;
+	int		len;
+	ssize_t	result;
+	len = 0;
+	result = read(0, &c, 1);
+	while (result > 0)
+	{
+		if (c == '\n')
+		{
+			line[len] = 0;
+			execute(d, line);
+			len = 0;
+		}
+		else if (len == 3 || c == 0)
+			fail(d);
+		else
+			line[len++] = c;
+		result = read(0, &c, 1);
+	}
+	if (result < 0 || len)
+		fail(d);
+}
+int	main(int argc, char **argv)
+{
+	t_data	d;
+	if (argc == 1)
+		return (0);
+	d = (t_data){0};
+	d.silent = 1;
+	parse(&d, argc, argv);
+	rank_input(&d);
+	read_ops(&d);
+	if (!d.b.n && sorted(&d.a))
+		putstr(1, "OK\n");
+	else
+		putstr(1, "KO\n");
+	destroy(&d);
+	return (0);
+}
+
+
+===== src/utils.c =====
+/*                                                                            */
+/*                                                        :::      ::::::::   */
+/*   utils.c                                            :::      ::::::::   */
+/*                                                    +:+ +:+         +:+     */
+/*   By: student <student@student.42.fr>            +#+  +:+       +#+        */
+/*                                                +#+#+#+#+#+   +#+           */
+/*   Created: 2026/11/13 12:00:00 by student           #+#    #+#             */
+/*   Updated: 2026/11/13 12:00:00 by student          ###   ########.fr       */
+/*                                                                            */
+/* ************************************************************************** */
+#include "push_swap.h"
+void	putstr(int fd, const char *s)
+{
+	int	i;
+	i = 0;
+	while (s[i])
+		i++;
+	if (write(fd, s, i) < 0)
+		return ;
+}
+void	putnum(int fd, size_t n)
+{
+	char	c;
+	if (n > 9)
+		putnum(fd, n / 10);
+	c = '0' + n % 10;
+	if (write(fd, &c, 1) < 0)
+		return ;
+}
+int	equal(const char *a, const char *b)
+{
+	while (*a && *a == *b)
+	{
+		a++;
+		b++;
+	}
+	return (*a == *b);
+}
+void	destroy(t_data *d)
+{
+	free(d->a.v);
+	free(d->b.v);
+}
+void	fail(t_data *d)
+{
+	destroy(d);
+	putstr(2, "Error\n");
+	exit(1);
+}
+
+
+===== Makefile =====
+NAME = push_swap
+CC = cc
+CFLAGS = -Wall -Wextra -Werror
+CPPFLAGS = -Iinclude
+COMMON = utils stack names parse rank sort
+SRC = $(addprefix src/,$(addsuffix .c,$(COMMON) medium bench main))
+OBJ = $(SRC:.c=.o)
+BONUS_OBJ = $(addprefix src/,$(addsuffix .o,$(COMMON) checker_bonus))
+all: $(NAME)
+$(NAME): $(OBJ)
+	$(CC) $(CFLAGS) $(OBJ) -o $@
+checker: $(BONUS_OBJ)
+	$(CC) $(CFLAGS) $(BONUS_OBJ) -o $@
+bonus: checker
+src/%.o: src/%.c include/push_swap.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+clean:
+	rm -f $(OBJ) $(BONUS_OBJ)
+fclean: clean
+	rm -f $(NAME) checker
+re: fclean
+	$(MAKE) all
+.PHONY: all bonus clean fclean re
